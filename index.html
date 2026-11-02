@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tutor Raspberry Pi</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: Arial, sans-serif; max-width: 760px; margin: 40px auto; padding: 20px; background: #f4f4f9; color: #172033; }
+    h1 { margin-bottom: 8px; }
+    .description, .note { color: #526077; line-height: 1.5; }
+    label { display: block; font-weight: bold; margin: 20px 0 8px; }
+    select, input, button { font: inherit; border-radius: 6px; padding: 12px; }
+    select { width: 100%; border: 1px solid #b7c1d0; background: white; }
+    #chat { background: white; height: 420px; border: 1px solid #ccd3df; padding: 16px; overflow-y: auto; margin: 18px 0 12px; border-radius: 8px; }
+    .message { margin-bottom: 14px; padding: 12px; border-radius: 6px; overflow-wrap: anywhere; }
+    .user { background: #e3f2fd; }
+    .bot { background: #edf7e9; }
+    .error { background: #fff0f0; color: #a21818; }
+    .message strong { display: block; margin-bottom: 6px; }
+    .response-time { display: block; margin-bottom: 8px; font-size: 13px; color: #3f5268; }
+    .response-note { display: block; margin-top: 8px; font-size: 13px; line-height: 1.5; color: #805000; }
+    .message p { margin: 0; white-space: pre-wrap; line-height: 1.5; }
+    .input-group { display: flex; gap: 10px; }
+    input { flex: 1; min-width: 0; border: 1px solid #b7c1d0; }
+    button { border: 0; background: #1766c2; color: white; cursor: pointer; }
+    button:disabled { opacity: .55; cursor: wait; }
+    #clearButton { background: #e1e7ef; color: #172033; margin-top: 10px; }
+    #status { min-height: 24px; margin: 8px 0; color: #526077; }
+    .note { font-size: 14px; }
+    :focus-visible { outline: 3px solid #e9a400; outline-offset: 3px; }
+    @media (max-width: 480px) { body { margin: 10px auto; padding: 12px; } #chat { height: 360px; } }
+  </style>
+</head>
+<body>
+  <h1>Tutor Raspberry Pi</h1>
+  <p class="description">Instalación, acceso remoto y GPIO. Compara el tutor especializado con Qwen original.</p>
+
+  <label for="modelSelect">Modelo</label>
+  <select id="modelSelect">
+    <option value="asistente-raspberrypi">Tutor Raspberry Pi final</option>
+    <option value="qwen3.5:2b">Qwen original (qwen3.5:2b)</option>
+    <option value="raspberrypi-a">Variante A — Referencia: 0.2 / 4096 / 600 / 80</option>
+    <option value="raspberrypi-b">Variante B — Temperatura 0.8</option>
+    <option value="raspberrypi-c">Variante C — Contexto 2048</option>
+    <option value="raspberrypi-d">Variante D — Salida máxima 150</option>
+    <option value="raspberrypi-e">Variante E — Lote 256</option>
+  </select>
+
+  <div id="chat" role="log" aria-label="Preguntas y respuestas" aria-live="polite"></div>
+  <p id="status" role="status">Listo para consultar.</p>
+
+  <form id="chatForm" class="input-group">
+    <input id="userInput" type="text" placeholder="Escribe tu pregunta..." aria-label="Pregunta" autocomplete="off" required>
+    <button id="sendButton" type="submit">Enviar</button>
+  </form>
+  <button id="clearButton" type="button">Limpiar chat</button>
+  <p class="note">Cada pregunta se envía de forma independiente, sin el historial anterior. El tiempo de cada respuesta incluye la espera total y la carga del modelo, si corresponde. Mantén Ollama abierto en este equipo.</p>
+
+  <script>
+    const API_URL = 'http://localhost:11434/api/generate';
+    const chat = document.getElementById('chat');
+    const input = document.getElementById('userInput');
+    const modelSelect = document.getElementById('modelSelect');
+    const sendButton = document.getElementById('sendButton');
+    const clearButton = document.getElementById('clearButton');
+    const status = document.getElementById('status');
+    let busy = false;
+
+    // textContent muestra las respuestas como texto, sin ejecutar HTML.
+    function addMessage(type, author, text, seconds = null, incomplete = false) {
+      const message = document.createElement('div');
+      message.className = `message ${type}`;
+      const heading = document.createElement('strong');
+      heading.textContent = author;
+      const content = document.createElement('p');
+      content.textContent = text;
+      message.appendChild(heading);
+      if (seconds !== null) {
+        const timing = document.createElement('small');
+        timing.className = 'response-time';
+        timing.textContent = `Tiempo de respuesta: ${seconds} s`;
+        message.appendChild(timing);
+      }
+      message.appendChild(content);
+      if (incomplete) {
+        const note = document.createElement('small');
+        note.className = 'response-note';
+        note.textContent = 'Nota: respuesta posiblemente incompleta. Se alcanzó el límite de generación.';
+        message.appendChild(note);
+      }
+      chat.appendChild(message);
+      chat.scrollTop = chat.scrollHeight;
+    }
+
+    function setBusy(value) {
+      busy = value;
+      input.disabled = value;
+      modelSelect.disabled = value;
+      sendButton.disabled = value;
+      clearButton.disabled = value;
+      sendButton.textContent = value ? 'Esperando...' : 'Enviar';
+      chat.setAttribute('aria-busy', String(value));
+    }
+
+    document.getElementById('chatForm').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const prompt = input.value.trim();
+      if (!prompt || busy) return;
+
+      const model = modelSelect.value;
+      const modelLabel = modelSelect.options[modelSelect.selectedIndex].text;
+      addMessage('user', 'Tú', prompt);
+      input.value = '';
+      setBusy(true);
+      status.textContent = `${modelLabel} está respondiendo. La primera consulta puede tardar mientras carga el modelo.`;
+
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 300000);
+      const started = performance.now();
+
+      try {
+        const response = await fetch(API_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
+          body: JSON.stringify({ model, prompt, stream: false, think: false })
+        });
+        const data = await response.json();
+
+        if (!response.ok || data.error) {
+          throw new Error(data.error || `Error HTTP ${response.status}`);
+        }
+        if (typeof data.response !== 'string' || !data.response.trim()) {
+          throw new Error('El modelo no devolvió texto. Revisa su configuración y el límite num_predict.');
+        }
+
+        const seconds = ((performance.now() - started) / 1000).toFixed(2);
+        addMessage('bot', modelLabel, data.response, seconds, data.done_reason === 'length');
+        status.textContent = `Respuesta recibida en ${seconds} segundos.`;
+        if (data.done_reason === 'length') {
+          status.textContent += ' Se alcanzó el límite de generación; la respuesta puede estar incompleta.';
+        }
+      } catch (error) {
+        let message = error.message;
+        if (error.name === 'AbortError') {
+          message = 'La espera superó los 5 minutos. Comprueba Ollama o prueba una pregunta más corta.';
+        } else if (error instanceof TypeError) {
+          message = 'No se pudo conectar con Ollama. Comprueba que esté abierto en localhost:11434 y abre esta página desde un servidor local. Si el navegador informa un error CORS, revisa OLLAMA_ORIGINS.';
+        }
+        addMessage('error', 'Error', message);
+        status.textContent = 'La consulta no se completó. Puedes volver a intentarlo.';
+      } finally {
+        clearTimeout(timeout);
+        setBusy(false);
+        input.focus();
+      }
+    });
+
+    clearButton.addEventListener('click', () => {
+      chat.replaceChildren();
+      status.textContent = 'Chat limpio. Listo para consultar.';
+      input.focus();
+    });
+  </script>
+</body>
+</html>
